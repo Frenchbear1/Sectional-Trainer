@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Find aeronautical chart markings and teach from real FAA charts.">
+  <title>Sectional Chart Trainer</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="catalog.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <span class="logo" aria-hidden="true">◈</span>
+    <div><h1>Sectional Chart Trainer</h1><p>FAA chart markings and real-world examples</p></div>
+    <a class="guide-link" href="https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/aero_guide/" target="_blank" rel="noopener">FAA guide ↗</a>
+  </header>
+  <main>
+    <aside class="index" id="index">
+      <label for="search">Find a chart marking</label>
+      <div class="search-wrap"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="e.g. blue fuzzy line, KABE, railroad" autocomplete="off" spellcheck="false"></div>
+      <nav aria-label="Index filters" class="filters">
+        <button class="selected" type="button" data-filter="all" aria-pressed="true">All</button>
+        <button type="button" data-filter="examples" aria-pressed="false">Chart examples</button>
+        <button type="button" data-filter="saved" aria-pressed="false">Saved</button>
+      </nav>
+      <div class="index-tools">
+        <select id="family" aria-label="Chart family"></select>
+        <div id="count" role="status"></div>
+      </div>
+      <div id="results" class="results" aria-label="Search results"></div>
+    </aside>
+    <section class="workspace" aria-label="Chart workspace">
+      <div class="map-toolbar">
+        <button id="open-index" type="button" aria-expanded="false" aria-controls="index">Index</button>
+        <label for="layer" class="sr">Chart layer</label>
+        <select id="layer">
+          <option value="sectional">VFR Sectional</option>
+          <option value="tac">Terminal Area Chart</option>
+          <option value="low">IFR Enroute Low</option>
+          <option value="high">IFR Enroute High</option>
+        </select>
+        <span id="edition"></span>
+        <button id="scanner" type="button" aria-pressed="false" title="Find similar chart pixels from a sample you select">Match symbol</button>
+        <a id="original" href="https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/vfr/" target="_blank" rel="noopener">Original charts ↗</a>
+      </div>
+      <div class="map-pane">
+        <div id="map" tabindex="0" aria-label="Interactive FAA chart. Use arrow keys to pan, plus and minus to zoom.">
+          <div id="tiles" aria-hidden="true"></div>
+          <div id="target" aria-hidden="true" hidden></div>
+          <div id="scan-marks" aria-hidden="true"></div>
+        </div>
+        <div id="map-notice" class="map-notice" role="status" hidden></div>
+        <div class="map-buttons" aria-label="Map controls">
+          <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+          <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+          <button id="home" type="button" aria-label="Return to Lehigh Valley">⌂</button>
+        </div>
+        <div class="map-footer"><span id="position"></span><span>FAA Aeronautical Information Services · Training use</span></div>
+      </div>
+      <article id="details" class="details" aria-live="polite"></article>
+    </section>
+  </main>
+  <template id="empty"><p class="empty">No matches. Try a broader term or change the chart family.</p></template>
+  <noscript>This trainer requires JavaScript. The FAA guide and charts are available directly from the FAA.</noscript>
+</body>
+</html>
