@@ -1,3 +1,4 @@
+(() => {
 'use strict';
 const officialVfr = 'https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/vfr/';
 const officialTpp = 'https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/dtpp/';
@@ -812,3 +813,4 @@ PAPI visual glidepath|precision approach path indicator
 VASI visual glidepath|visual approach slope indicator
 `)
 ];
+})();
