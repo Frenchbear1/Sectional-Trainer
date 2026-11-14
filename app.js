@@ -58,7 +58,8 @@ let rootStatus = '';
 let sampleState = null;
 let sampleNotice = '';
 let sampleVersion = 0;
-let matches = [];
+let symbolCandidates = null;
+let selectedBox = null;
 const exampleStatus = item => item?.kind || (Number.isFinite(item?.lat) ? 'Chart location' : item?.url ? 'FAA source' : 'Example pending');
 const featureRoot = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/ArcGIS/rest/services/';
 const featureSources = [
@@ -109,6 +110,21 @@ function score(row, query, words) {
   return 15 + words.filter(word => title.includes(word)).length * 5;
 }
 function renderList(keepScroll = false) {
+  if (symbolCandidates !== null) {
+    byId('count').textContent = symbolCandidates.length + ' possible';
+    const heading = el('p','result-divider','Possible chart symbols');
+    const clear = action('Clear selection', resetScan);
+    const entries = symbolCandidates.map(({row, cue}) => {
+      const button = action('', () => select(row));
+      button.className = 'result result-copy';
+      button.append(el('strong','result-title',row.title), el('span','result-meta',cue));
+      return button;
+    });
+    if (!entries.length) entries.push(el('p','empty','Try a tighter box around one marking.'));
+    list.replaceChildren(heading, ...entries, clear);
+    list.scrollTop = 0;
+    return;
+  }
   const originalScroll = list.scrollTop;
   const query = normalize(search.value);
   const words = query.split(' ').filter(Boolean);
@@ -223,7 +239,9 @@ function unproject(x,y) {
   return {lon:wrap(x)*360-180,lat:Math.atan(Math.sinh(Math.PI*(1-2*clamp(y,0,1))))*180/Math.PI};
 }
 function setView(lat,lon,zoom) {
-  Object.assign(view,{lat,lon,zoom:clamp(zoom,layers[layer.value].min,15)});
+  const nextZoom = clamp(zoom,layers[layer.value].min,15);
+  if (sampleState && (lat !== view.lat || lon !== view.lon || nextZoom !== view.zoom)) resetScan();
+  Object.assign(view,{lat,lon,zoom:nextZoom});
   schedule();
 }
 function coordAt(x,y) {
@@ -319,7 +337,7 @@ function draw() {
   byId('position').textContent = view.lat.toFixed(3) + '°, ' + view.lon.toFixed(3) + '° · Zoom ' + view.zoom.toFixed(1);
   byId('edition').textContent = record.date ? 'FAA tiles · ' + record.date : 'FAA chart tiles';
   byId('original').href = record.source;
-  drawMatches(center,width,height);
+  drawSelection(center,width,height);
   mapStatus();
 }
 
@@ -358,15 +376,19 @@ for (const type of ['pointerup','pointercancel','lostpointercapture']) map.addEv
 });
 map.addEventListener('wheel',event => {
   event.preventDefault();
+  if (sampleState) return;
   const {x,y} = mapPoint(event);
   const delta = event.deltaMode === 1 ? event.deltaY*16 : event.deltaY;
   zoomAt(view.zoom-clamp(delta/180,-.9,.9),x,y);
 },{passive:false});
 map.addEventListener('dblclick',event => {
+  if (sampleState) return;
   const {x,y} = mapPoint(event);
   zoomAt(view.zoom+1,x,y);
 });
 map.addEventListener('keydown',event => {
+  if (event.key === 'Escape' && (sampleState || selectedBox)) {resetScan(); return;}
+  if (sampleState) return;
   const delta = {ArrowUp:[0,-85],ArrowDown:[0,85],ArrowLeft:[-85,0],ArrowRight:[85,0]}[event.key];
   if (delta) {
     const next = coordAt(map.clientWidth/2+delta[0],map.clientHeight/2+delta[1]);
@@ -524,164 +546,192 @@ async function searchFeatures(raw,request) {
 
 const scanButton = byId('scanner');
 const scanMarks = byId('scan-marks');
+const selectionOutline = el('div');
+selectionOutline.style.cssText = 'position:absolute;pointer-events:none;z-index:3;border:2px solid #faff92;background:#faff9225;box-shadow:0 0 0 1px #253438';
+selectionOutline.hidden = true;
+scanMarks.append(selectionOutline);
+scanButton.title = 'Drag a box around a chart symbol to filter the index';
+
 function resetScan() {
   sampleVersion++;
   sampleState = null;
   sampleNotice = '';
-  matches = [];
-  scanMarks.replaceChildren();
+  selectedBox = null;
+  selectionOutline.hidden = true;
+  if (symbolCandidates !== null) {
+    symbolCandidates = null;
+    renderList();
+  }
   scanButton.textContent = 'Match symbol';
   scanButton.setAttribute('aria-pressed','false');
   map.classList.remove('sampling');
   schedule();
 }
-scanButton.addEventListener('click',() => {
-  if (sampleState || sampleNotice) {resetScan(); return;}
-  matches = [];
-  sampleState = {layer:layer.value,first:null};
-  sampleNotice = 'Tap opposite corners around a small, clear symbol.';
+
+scanButton.addEventListener('click', () => {
+  if (sampleState) { resetScan(); return; }
+  resetScan();
+  sampleState = {layer:layer.value, pointerId:null};
+  sampleNotice = 'Drag a box tightly around one chart symbol.';
   scanButton.textContent = 'Cancel match';
   scanButton.setAttribute('aria-pressed','true');
   map.classList.add('sampling');
+  map.focus({preventScroll:true});
   schedule();
 });
-map.addEventListener('click',async event => {
-  if (!sampleState || sampleState.busy) return;
-  if (event.target.closest('.scan-mark')) return;
-  const state = sampleState;
-  const point = mapPoint(event);
-  if (!state.first) {
-    state.first = coordAt(point.x,point.y);
-    sampleNotice = 'Tap the opposite corner of the symbol.';
-    schedule();
-    return;
-  }
-  const first = state.first;
-  const end = coordAt(point.x,point.y);
+
+function dragBox(start, end) {
+  const left = Math.floor(clamp(Math.min(start.x,end.x),0,map.clientWidth));
+  const top = Math.floor(clamp(Math.min(start.y,end.y),0,map.clientHeight));
+  const right = Math.ceil(clamp(Math.max(start.x,end.x),0,map.clientWidth));
+  const bottom = Math.ceil(clamp(Math.max(start.y,end.y),0,map.clientHeight));
+  return {x:left,y:top,w:right-left,h:bottom-top};
+}
+
+function showBox({x,y,w,h}) {
+  selectionOutline.hidden = false;
+  Object.assign(selectionOutline.style,{left:x+'px',top:y+'px',width:w+'px',height:h+'px'});
+}
+
+function drawSelection(center,width,height) {
+  if (!selectedBox) return;
   const scale = 256*2**view.zoom;
-  const dx = (wrap(first.x-end.x+.5)-.5)*scale;
-  const dy = (first.y-end.y)*scale;
-  const w = Math.round(Math.abs(dx)), h = Math.round(Math.abs(dy));
-  const x = Math.round(point.x+Math.min(0,dx)), y = Math.round(point.y+Math.min(0,dy));
-  if (w<8 || h<8 || w>108 || h>108 || x<0 || y<0 || x+w>map.clientWidth || y+h>map.clientHeight) {
-    state.first = null;
-    sampleNotice = 'Choose a small box around the whole symbol, at least 8 pixels on each side.';
+  const ratio = 2**(view.zoom-selectedBox.zoom);
+  showBox({
+    x:width/2+(wrap(selectedBox.x-center.x+.5)-.5)*scale,
+    y:height/2+(selectedBox.y-center.y)*scale,
+    w:selectedBox.w*ratio,h:selectedBox.h*ratio
+  });
+}
+
+map.addEventListener('pointerdown', event => {
+  if (!sampleState || sampleState.busy || sampleState.pointerId !== null ||
+      event.button !== 0 || pointers.size) return;
+  sampleState.pointerId = event.pointerId;
+  sampleState.start = mapPoint(event);
+  map.setPointerCapture(event.pointerId);
+  showBox(dragBox(sampleState.start,sampleState.start));
+});
+map.addEventListener('pointermove', event => {
+  if (sampleState?.pointerId !== event.pointerId) return;
+  showBox(dragBox(sampleState.start,mapPoint(event)));
+});
+for (const type of ['pointercancel','lostpointercapture']) map.addEventListener(type,event => {
+  if (sampleState?.pointerId !== event.pointerId) return;
+  sampleState.pointerId = null;
+  selectionOutline.hidden = true;
+});
+map.addEventListener('pointerup', async event => {
+  const state = sampleState;
+  if (state?.pointerId !== event.pointerId) return;
+  state.pointerId = null;
+  const box = dragBox(state.start,mapPoint(event));
+  if (box.w < 4 || box.h < 4 || box.w > 360 || box.h > 360) {
+    selectionOutline.hidden = true;
+    sampleNotice = 'Drag a box between 4 and 360 pixels wide and tall. Zoom in for small markings.';
     schedule();
     return;
   }
   state.busy = true;
-  const scanView = { ...view };
-  const mapWidth = map.clientWidth, mapHeight = map.clientHeight;
-  sampleNotice = 'Looking for similar colors and shapes in this view…';
-  schedule();
   const request = ++sampleVersion;
+  selectedBox = {...box,...coordAt(box.x,box.y),zoom:view.zoom};
+  showBox(box);
+  sampleNotice = 'Reading the colors and shape inside the box.';
+  schedule();
   try {
-    const snapshot = await chartPixels();
+    const snapshot = await chartPixels(box);
     if (request !== sampleVersion) return;
-    const found = findSimilar(snapshot,x,y,w,h);
-    const center = project(scanView.lat,scanView.lon);
-    matches = found.map(item => ({
-      ...unproject(center.x+(item.x+w/2-mapWidth/2)/scale,center.y+(item.y+h/2-mapHeight/2)/scale),
-      layer:state.layer,zoom:scanView.zoom,w,h,score:item.score
-    }));
-    sampleNotice = matches.length ? matches.length + ' possible matches. Select an outline to inspect it.' : 'No close matches in this chart view.';
+    symbolCandidates = rankSymbols(describeSymbol(snapshot),state.layer);
+    renderList();
+    setIndex(true);
+    sampleNotice = symbolCandidates.length
+      ? symbolCandidates.length + ' possible symbols in the index. Compare their visual cues with the chart.'
+      : 'No clear symbol in the selection. Try a tighter box or zoom in.';
   } catch {
     if (request !== sampleVersion) return;
-    sampleNotice = 'Chart pixels are unavailable for matching in this browser or chart area.';
+    sampleNotice = 'Could not read the chart pixels in this box. Wait for the tiles to load and try again.';
   }
   sampleState = null;
-  scanButton.textContent = 'Clear match';
+  scanButton.textContent = 'Match symbol';
   scanButton.setAttribute('aria-pressed','false');
   map.classList.remove('sampling');
   schedule();
 });
-async function chartPixels() {
+
+async function chartPixels(box) {
   const canvas = document.createElement('canvas');
-  canvas.width = map.clientWidth;
-  canvas.height = map.clientHeight;
+  canvas.width = box.w;
+  canvas.height = box.h;
   const ctx = canvas.getContext('2d',{willReadFrequently:true});
   const images = visibleImages.filter(img => img.dataset.state === 'ready').map(img => {
     const transform = /^translate\(([-.\d]+)px,\s*([-.\d]+)px\)$/.exec(img.style.transform);
-    return {url:img.src,x:Number(transform?.[1]),y:Number(transform?.[2]),size:parseFloat(img.style.width)};
-  });
-  if (!images.length) throw new Error('No visible tiles');
-  await Promise.all(images.map(image => new Promise((resolve,reject) => {
+    return {url:img.src,x:Number(transform?.[1])-box.x,y:Number(transform?.[2])-box.y,size:parseFloat(img.style.width)};
+  }).filter(({x,y,size}) => x<box.w && y<box.h && x+size>0 && y+size>0);
+  if (!images.length) throw new Error('No chart tiles in selection');
+  await Promise.allSettled(images.map(image => new Promise((resolve,reject) => {
     const bitmap = new Image();
     bitmap.crossOrigin = 'anonymous';
     bitmap.onload = () => {ctx.drawImage(bitmap,image.x,image.y,image.size,image.size); resolve();};
     bitmap.onerror = reject;
     bitmap.src = image.url;
   })));
-  return ctx.getImageData(0,0,canvas.width,canvas.height);
+  return ctx.getImageData(0,0,box.w,box.h);
 }
-function findSimilar(image,x,y,w,h) {
-  const {data,width,height} = image;
-  const get = (px,py) => (py*width+px)*4;
-  const samples = [];
-  const cols = Math.min(10,w);
-  const lines = Math.min(10,h);
-  for (let row=0;row<lines;row++) for (let col=0;col<cols;col++) {
-    const dx = Math.floor((col+.5)*w/cols), dy = Math.floor((row+.5)*h/lines);
-    const i = get(x+dx,y+dy);
-    if (data[i+3] < 220) throw new Error('Sample extends off chart');
-    const r=data[i],g=data[i+1],b=data[i+2];
-    samples.push({dx,dy,r,g,b,priority:Math.max(r,g,b)-Math.min(r,g,b)+(255-Math.min(r,g,b))*.4});
+
+function describeSymbol({data,width,height}) {
+  const colors = {blue:0,magenta:0,dark:0,green:0,brown:0};
+  let covered = 0;
+  for (let i=0;i<data.length;i+=4) {
+    const [r,g,b,alpha] = data.subarray(i,i+4);
+    if (alpha < 220) continue;
+    covered++;
+    const lightest = Math.max(r,g,b);
+    const darkest = Math.min(r,g,b);
+    if (b-g>12 && r-g>14 && lightest<246) colors.magenta++;
+    else if (b-r>21 && b>=g-5 && darkest<172) colors.blue++;
+    else if (g-r>17 && g-b>8 && darkest<165) colors.green++;
+    else if (r-b>30 && r-g>8 && darkest<170) colors.brown++;
+    else if (lightest<126 && lightest-darkest<47) colors.dark++;
   }
-  samples.sort((a,b) => b.priority-a.priority);
-  const seeds = samples.slice(0,8);
-  if (seeds[0].priority < 12) return [];
-  function distance(px,py,points) {
-    let total = 0, weight = 0;
-    for (const {dx,dy,r,g,b,priority} of points) {
-      const i = get(px+dx,py+dy);
-      if (data[i+3] < 220) return Infinity;
-      const diff = Math.abs(r-data[i])+Math.abs(g-data[i+1])+Math.abs(b-data[i+2]);
-      const factor = .35 + Math.min(1,priority/145);
-      total += diff*factor;
-      weight += factor;
+  if (covered < width*height*.75) throw new Error('Incomplete tile coverage');
+  return {colors,aspect:Math.max(width/height,height/width),area:covered};
+}
+
+// Families are ranked by visible ink and whether the crop is long or compact.
+// Several markings share the same colors, so keep plausible alternatives.
+const symbolProfiles = [
+  ['blue','line',/^Class [BD] (airspace|surface area)|^Victor airway centerline|^(Prohibited|Restricted|Warning) area/,'Blue or cyan boundary or route line'],
+  ['blue','compact',/^VOR|^TACAN|with tower|^Class [BD] (shelf|ceiling)|^Maximum Elevation Figure|^Victor airway number/,'Compact blue or cyan marking'],
+  ['magenta','line',/^Class C (airspace|cutout)|^Class E (surface|700-foot)|^Military operations area|^Alert area|^Isogonic line/,'Magenta boundary, vignette, or line'],
+  ['magenta','compact',/^Class C floor|without tower|^Restricted or private airport|^NDB|^Glider operations|^Parachute jumping area|^Isogonic value/,'Compact magenta marking'],
+  ['dark','line',/^Railroad|^Road|^Military training route/,'Dark line or route'],
+  ['dark','compact',/^Obstruction|^Airport runway pattern|^Airport data grouping|^Railroad station/,'Compact dark symbol or annotation'],
+  ['green','line',/river|wooded|forest/i,'Green or blue-green chart detail'],
+  ['green','compact',/wooded|forest|vegetation/i,'Compact green chart detail'],
+  ['brown','line',/contour|terrain relief|ridge/i,'Brown line associated with terrain'],
+  ['brown','compact',/contour|terrain relief|spot elevation/i,'Compact brown terrain detail'],
+  ['blue','line',/^IFR (Class [BCDE] airspace|T-route|Q-route|colored federal airway)/,'Blue IFR route or airspace marking'],
+  ['magenta','line',/^IFR (military operations area|alert area|special use airspace)/,'Magenta IFR airspace marking'],
+  ['dark','line',/^IFR (jet route|direct route|ATS route|one-way airway arrow|ARTCC boundary)/,'Dark IFR route or boundary line'],
+  ['dark','compact',/^IFR (minimum enroute altitude|minimum obstruction clearance altitude|route leg distance|off-route obstruction clearance altitude|center frequency box|VFR waypoint)/,'Compact IFR label or waypoint']
+];
+
+function rankSymbols({colors,aspect,area},chartLayer) {
+  const peak = Math.max(...Object.values(colors));
+  if (peak < Math.max(5,area*.009)) return [];
+  const compact = aspect<1.6;
+  const relevantRows = rows.filter(row => chartLayer==='low' || chartLayer==='high'
+    ? /^ifr/.test(row.group) : !/^ifr/.test(row.group));
+  const candidates = new Map();
+  for (const [color,shape,titles,cue] of symbolProfiles) {
+    const count = colors[color];
+    if (count < Math.max(5,peak*.22,area*.006)) continue;
+    const score = count/peak + ((shape==='compact')===compact ? .45 : 0);
+    for (const row of relevantRows) {
+      if (!titles.test(row.title) || (candidates.get(row.id)?.score ?? 0) >= score) continue;
+      candidates.set(row.id,{row,cue,score});
     }
-    return total/(3*weight);
   }
-  const result = [];
-  const step = Math.max(2,Math.ceil(Math.sqrt(width*height/210000)));
-  for (let py=0;py<=height-h;py+=step) for (let px=0;px<=width-w;px+=step) {
-    if (Math.abs(px-x)<w*.8 && Math.abs(py-y)<h*.8) continue;
-    if (distance(px,py,seeds)>37) continue;
-    const score = distance(px,py,samples);
-    if (score>26) continue;
-    const nearby = result.findIndex(item => Math.abs(item.x-px)<w/2 && Math.abs(item.y-py)<h/2);
-    const item = {x:px,y:py,score};
-    if (nearby>=0) {
-      if (score<result[nearby].score) result[nearby] = item;
-    } else result.push(item);
-    if (result.length>32) result.sort((a,b)=>a.score-b.score).splice(22);
-  }
-  return result.sort((a,b)=>a.score-b.score).slice(0,12);
-}
-function drawMatches(center,width,height) {
-  if (!matches.length) {if (scanMarks.children.length) scanMarks.replaceChildren(); return;}
-  if (scanMarks.children.length !== matches.length) {
-    scanMarks.removeAttribute('aria-hidden');
-    scanMarks.replaceChildren(...matches.map((item,index) => {
-      const button = action('',() => {
-        setView(item.lat,item.lon,view.zoom);
-        sampleNotice = 'Possible match ' + (index+1) + ' of ' + matches.length + '. Verify the shape on the chart before pinning it.';
-        schedule();
-      });
-      button.className = 'scan-mark';
-      button.setAttribute('aria-label','Inspect possible match '+(index+1));
-      return button;
-    }));
-  }
-  const scale = 256*2**view.zoom;
-  for (const [index,item] of matches.entries()) {
-    const mark = scanMarks.children[index];
-    const pt = project(item.lat,item.lon);
-    const ratio = 2**(view.zoom-item.zoom);
-    mark.hidden = item.layer !== layer.value;
-    mark.style.left = (width/2+(wrap(pt.x-center.x+.5)-.5)*scale)+'px';
-    mark.style.top = (height/2+(pt.y-center.y)*scale)+'px';
-    mark.style.width = (item.w*ratio)+'px';
-    mark.style.height = (item.h*ratio)+'px';
-  }
+  return [...candidates.values()].sort((a,b) => b.score-a.score)
+    .slice(0,10);
 }
