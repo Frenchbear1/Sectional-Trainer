@@ -9,6 +9,7 @@ const layer = byId('layer');
 const map = byId('map');
 const tiles = byId('tiles');
 const target = byId('target');
+const targetInk = byId('target-ink');
 const notice = byId('map-notice');
 const guidePdf = 'https://aeronav.faa.gov/user_guide/cug-complete_20260709.pdf';
 const vfr = 'https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/vfr/';
@@ -35,15 +36,71 @@ function readPins() {
   } catch {return new Map();}
 }
 const ownPins = readPins();
+const guideAssets = window.FAA_GUIDE_ASSETS;
+const mapExamples = window.FAA_MAP_EXAMPLES;
+const guideDialog = byId('guide-dialog');
+const thumbObserver = new IntersectionObserver(items => {
+  for (const { target: crop, isIntersecting } of items) {
+    if (!isIntersecting) continue;
+    crop.style.backgroundImage = crop.dataset.background;
+    thumbObserver.unobserve(crop);
+  }
+}, {root:list,rootMargin:'160px'});
+const guideKind = illustration => illustration[3] === 1 ? 'FAA guide illustration' :
+  illustration[3] === 2 ? 'Related FAA guide detail' : 'FAA guide page reference';
+const guideExample = illustration => ({
+  name: illustration[2],kind:guideKind(illustration),
+  url:guidePdf+'#page='+illustration[1],illustration
+});
+
+function verifiedExamples(title, examples) {
+  if (/^(VOR\/DME|IFR VOR\/DME)$/.test(title)) {
+    return [mapExamples.etx,mapExamples.sbj].map(item => title.startsWith('IFR') ?
+      {...item,layer:'low',ink:'blue',kind:'FAA data location'} : item);
+  }
+  if (title === 'VORTAC') return [mapExamples.pottstown];
+  const additional = {
+    'Military operations area':mapExamples.duke,
+    'Warning area':mapExamples.warning,
+    'Alert area':mapExamples.alert,
+    'Victor airway centerline':mapExamples.v29
+  }[title];
+  if (additional) return [{...additional,kind:'FAA boundary or route geometry',
+    note:'The highlight follows the feature’s published FAA geometry.'}];
+  if (/^TRSA|^Terminal Radar Service Area$/i.test(title)) return [];
+  const verified = examples.map(item => {
+    let geometry;
+    if (title==='Class C airspace') geometry = mapExamples.abe;
+    if (/^Class B (airspace|on a Terminal Area Chart)$/.test(title)) geometry = item.layer==='tac' ? mapExamples.jfk : mapExamples.phl;
+    if (title==='Class D airspace') geometry = item.name.includes('Reading') ? mapExamples.rdg : mapExamples.ttn;
+    if (title==='Restricted area') geometry = mapExamples.r5002;
+    if (title==='Prohibited area') geometry = mapExamples.p56;
+    if (geometry) return {...item,...geometry,kind:'FAA boundary geometry',note:'The outline follows the FAA dataset for this feature. Check the original chart for labels and printed detail.'};
+    if (/^(Lehigh Valley International|Towered civil landplane airport|Airport runway pattern)$/.test(title)) return {...item,ink:'blue',radius:83,note:'The highlight follows the blue airport symbol on the chart.'};
+    if (/^(Queen City Airport|Greenwood Lake Airport|Non-towered civil landplane airport)$/.test(title)) return {...item,ink:'magenta',radius:78,note:'The highlight follows the magenta airport symbol on the chart.'};
+    return item;
+  });
+  if (title==='Class C airspace') verified.push({...mapExamples.mdt,kind:'FAA boundary geometry',
+    note:'Compare the Harrisburg Class C boundaries with the shelves at Allentown.'});
+  return verified;
+}
 const rows = window.CHART_INDEX.flatMap(group => group.rows.map(row => {
   const [title, aliases = '', description = '', exampleKey = ''] = row.split('|');
+  const id = group.id + '-' + normalize(title).replaceAll(' ','-');
+  const illustration = guideAssets.rows[id];
+  const examples = verifiedExamples(title,window.CHART_EXAMPLES[exampleKey] || []);
   return {
-    id: group.id + '-' + normalize(title).replaceAll(' ','-'), group: group.id, section:group.section,
-    title, aliases, description, examples:window.CHART_EXAMPLES[exampleKey] || [],
+    id,group:group.id,section:group.section,title,aliases,description,illustration,
+    examples: illustration ? [...examples,guideExample(illustration)] : examples,
     searchable:normalize(title + ' ' + aliases + ' ' + group.section + ' ' + description)
   };
 }));
-const byExample = new Map(rows.map(row => [row.id,row]));
+const figureRows = guideAssets.panels.map(([asset,page,title,group,tight],index) => {
+  const illustration = [asset,page,title,tight];
+  return {id:'guide-'+index,title,group,section:'FAA Chart Users’ Guide',illustration,
+    searchable:normalize(title+' page '+page),examples:[guideExample(illustration)]};
+});
+const byExample = new Map([...rows,...figureRows].map(row => [row.id,row]));
 for (const row of rows) row.examples = [...(ownPins.get(row.id) || []),...row.examples];
 let active = null;
 let exampleNumber = 0;
@@ -60,7 +117,9 @@ let sampleNotice = '';
 let sampleVersion = 0;
 let symbolCandidates = null;
 let selectedBox = null;
-const exampleStatus = item => item?.kind || (Number.isFinite(item?.lat) ? 'Chart location' : item?.url ? 'FAA source' : 'Example pending');
+let inkState = null;
+let selectedPixels = null;
+const exampleStatus = item => item?.kind || (Number.isFinite(item?.lat) ? 'Chart location' : 'FAA source');
 const featureRoot = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/ArcGIS/rest/services/';
 const featureSources = [
   {id:'US_Airport', label:'Airport', code:'ICAO_ID', fallback:'IDENT', name:'NAME', group:'sec-airports'},
@@ -95,6 +154,38 @@ function action(label, handler, selected = false) {
   item.addEventListener('click', handler);
   return item;
 }
+function guideCrop(illustration, lazy = false) {
+  const [atlas,x,y,width,height,atlasHeight] = guideAssets.locations[illustration[0]];
+  const crop = el('span','guide-crop');
+  const background = 'url(guide/faa-'+String(atlas).padStart(2,'0')+'.webp)';
+  crop.style.setProperty('--crop-aspect',width/height);
+  crop.style.setProperty('--crop-max',Math.max(width*1.35,110)+'px');
+  crop.style.backgroundSize = (2048/width*100)+'% '+(atlasHeight/height*100)+'%';
+  crop.style.backgroundPosition = (x/(2048-width)*100)+'% '+(y/(atlasHeight-height)*100)+'%';
+  if (lazy) {
+    crop.dataset.background = background;
+    thumbObserver.observe(crop);
+  } else crop.style.backgroundImage = background;
+  return crop;
+}
+function guideThumbnail(illustration, handler) {
+  const thumb = handler ? action('',handler) : el('span');
+  thumb.className = 'guide-thumb';
+  if (handler) thumb.setAttribute('aria-label','Enlarge FAA guide figure');
+  else thumb.setAttribute('aria-hidden','true');
+  thumb.append(guideCrop(illustration,!handler));
+  return thumb;
+}
+function openGuide(title, illustration) {
+  byId('guide-title').textContent = title;
+  byId('guide-credit').textContent = guideKind(illustration)+' · page '+illustration[1]+' · July 9, 2026';
+  const crop = guideCrop(illustration);
+  crop.setAttribute('role','img');
+  crop.setAttribute('aria-label',illustration[2]);
+  byId('guide-figure').replaceChildren(crop);
+  byId('guide-page').href = guidePdf+'#page='+illustration[1];
+  guideDialog.showModal();
+}
 function setIndex(open) {
   indexPanel.classList.toggle('open', open);
   byId('open-index').setAttribute('aria-expanded', String(open));
@@ -110,14 +201,22 @@ function score(row, query, words) {
   return 15 + words.filter(word => title.includes(word)).length * 5;
 }
 function renderList(keepScroll = false) {
+  thumbObserver.disconnect();
   if (symbolCandidates !== null) {
     byId('count').textContent = symbolCandidates.length + ' possible';
     const heading = el('p','result-divider','Possible chart symbols');
     const clear = action('Clear selection', resetScan);
     const entries = symbolCandidates.map(({row, cue}) => {
-      const button = action('', () => select(row));
-      button.className = 'result result-copy';
-      button.append(el('strong','result-title',row.title), el('span','result-meta',cue));
+      const button = action('', () => {
+        selectedPixels.mask = makeInkMask(selectedPixels.image,
+          symbolCandidates.find(candidate => candidate.row === row).color);
+        select(row,true);
+      });
+      button.className = 'result';
+      const copy = el('span','result-copy');
+      copy.append(el('strong','result-title',row.title), el('span','result-meta',cue));
+      if (row.illustration) button.append(guideThumbnail(row.illustration));
+      button.append(copy);
       return button;
     });
     if (!entries.length) entries.push(el('p','empty','Try a tighter box around one marking.'));
@@ -128,34 +227,37 @@ function renderList(keepScroll = false) {
   const originalScroll = list.scrollTop;
   const query = normalize(search.value);
   const words = query.split(' ').filter(Boolean);
-  const matched = rows.filter(row => (family.value === 'all' || family.value === row.group) &&
-      (filter !== 'examples' || row.examples.length) && (filter !== 'saved' || saved.has(row.id)))
+  const collection = filter==='guide' ? figureRows : rows;
+  const matched = collection.filter(row => (family.value === 'all' || family.value === row.group) &&
+      (filter !== 'examples' || row.examples.some(item => !item.illustration)) && (filter !== 'saved' || saved.has(row.id)))
     .map((row, index) => [row, query ? score(row,query,words) : 0, index])
     .filter(entry => entry[1] >= 0)
-    .sort((a,b) => b[1]-a[1] || (query ? 0 : Number(Boolean(b[0].examples.length))-Number(Boolean(a[0].examples.length))) || a[2]-b[2]);
-  byId('count').textContent = matched.length.toLocaleString() + ' / ' + rows.length.toLocaleString();
+    .sort((a,b) => b[1]-a[1] || (query ? 0 : Number(Boolean(b[0].examples.some(item => !item.illustration)))-Number(Boolean(a[0].examples.some(item => !item.illustration)))) || a[2]-b[2]);
+  byId('count').textContent = matched.length.toLocaleString() + ' / ' + collection.length.toLocaleString();
   const result = document.createDocumentFragment();
   const appendRow = row => {
     const button = action('', () => select(row));
     button.className = 'result';
     button.dataset.id = row.id;
     if (active?.id === row.id) button.setAttribute('aria-current','true');
-    const icon = el('span','result-icon',row.examples.length ? '◉' : '◇');
+    const icon = row.illustration ? guideThumbnail(row.illustration) : el('span','result-icon','◉');
     icon.setAttribute('aria-hidden','true');
     const copy = el('span','result-copy');
-    copy.append(el('strong','result-title',row.title), el('span','result-meta',row.section + ' · ' + exampleStatus(row.examples[0])));
+    const source = row.illustration ? guideKind(row.illustration)+' · p. '+row.illustration[1] : exampleStatus(row.examples[0]);
+    copy.append(el('strong','result-title',row.title), el('span','result-meta',source));
     button.append(icon, copy, el('span','result-arrow','›'));
     result.append(button);
   };
-  const locations = filter === 'saved' ? [] : featureRows.filter(row => family.value === 'all' || row.group === family.value);
-  if (locations.length || featureMessage) {
+  const showLocations = filter !== 'saved' && filter !== 'guide';
+  const locations = showLocations ? featureRows.filter(row => family.value === 'all' || row.group === family.value) : [];
+  if (showLocations && (locations.length || featureMessage)) {
     if (locations.length) result.append(el('p','result-divider','FAA feature search'));
     for (const row of locations) appendRow(row);
     if (featureMessage) result.append(el('p','result-divider',featureMessage));
     if (matched.length && locations.length) result.append(el('p','result-divider','Guide index'));
   }
   for (const [row] of matched) appendRow(row);
-  if (!matched.length && !locations.length && !featureMessage) result.append(byId('empty').content.cloneNode(true));
+  if (!matched.length && !locations.length) result.append(byId('empty').content.cloneNode(true));
   list.replaceChildren(result);
   list.scrollTop = keepScroll ? originalScroll : 0;
 }
@@ -170,18 +272,18 @@ function details() {
     actions.append(action('Show Class C', () => select(rows.find(row => row.title === 'Class C airspace')),true));
   } else {
     const item = active.examples[exampleNumber];
-    copy.append(el('p','meta',active.section + ' · ' + exampleStatus(item) + (item ? ' · ' + item.name : '')));
+    copy.append(el('p','meta', selectedPixels ? 'Selected chart marking' : active.section + ' · ' + exampleStatus(item) + (item ? ' · ' + item.name : '')));
     copy.append(el('h2','',teaching && item ? 'Find the marking on the chart' : active.title));
     copy.append(el('p','',teaching && item ? 'Reveal the marking when the student is ready.' : active.description || (item ? item.note : 'Open the guide and use this title to find the related illustration or text.')));
     if (!teaching && item?.note && active.description && item.note !== active.description) copy.append(el('p','',item.note));
-    if (!item) copy.append(el('p','','Chart example pending.'));
-    if (item?.url) actions.append(link(item.kind === 'FAA chart PDF' ? 'Open FAA PDF ↗' : 'Open FAA source ↗',item.url));
-    if (Number.isFinite(item?.lat)) {
+    if (item?.url && !selectedPixels) actions.append(link(item.illustration ? 'FAA guide page ↗' : item.kind === 'FAA chart PDF' ? 'Open FAA PDF ↗' : 'Open FAA source ↗',item.url));
+    if (Number.isFinite(item?.lat) && !selectedPixels && (pin?.paths || pin?.ink)) {
       actions.append(action(teaching ? 'Reveal' : 'Quiz mode', () => { teaching = !teaching; showTarget = !teaching; details(); schedule(); },true));
-      if (!teaching) actions.append(action(showTarget ? 'Hide marker' : 'Show marker', () => { showTarget = !showTarget; details(); schedule(); }));
+      if (!teaching) actions.append(action(showTarget ? 'Hide highlight' : 'Show highlight', () => { showTarget = !showTarget; details(); schedule(); }));
     }
-    if (active.examples.length > 1) actions.append(action('Next ' + (exampleNumber+1) + '/' + active.examples.length, () => jumpExample((exampleNumber+1)%active.examples.length)));
-    if (!teaching && !active.live) actions.append(action('Pin chart center', () => {
+    if (selectedPixels) actions.append(action('Open example', () => jumpExample(0)));
+    else if (active.examples.length > 1) actions.append(action('Next ' + (exampleNumber+1) + '/' + active.examples.length, () => jumpExample((exampleNumber+1)%active.examples.length)));
+    if (!teaching && !active.live && !active.id.startsWith('guide-')) actions.append(action('Pin chart center', () => {
       const entry = {name:'Saved chart center',kind:'My example',lat:view.lat,lon:view.lon,zoom:view.zoom,layer:layer.value};
       ownPins.set(active.id,[entry,...(ownPins.get(active.id)||[])]);
       active.examples.unshift(entry);
@@ -202,9 +304,15 @@ function details() {
       details();
       renderList(true);
     }));
-    if (!active.live) actions.append(link('FAA guide ↗',guidePdf));
   }
-  panel.replaceChildren(copy, actions);
+  const illustration = active?.examples[exampleNumber]?.illustration || active?.illustration;
+  const info = el('div','guide-detail');
+  if (illustration && !teaching) {
+    info.append(guideThumbnail(illustration,() => openGuide(active.title,illustration)));
+    if (active.examples[exampleNumber]?.illustration) actions.append(action('Enlarge FAA figure',() => openGuide(active.title,illustration)));
+  }
+  info.append(copy);
+  panel.replaceChildren(info,actions);
 }
 function jumpExample(number) {
   resetScan();
@@ -213,18 +321,32 @@ function jumpExample(number) {
   showTarget = true;
   const place = active?.examples[number];
   pin = null;
+  inkState = null;
   if (Number.isFinite(place?.lat)) {
     layer.value = place.layer || 'sectional';
     setView(place.lat,place.lon,place.zoom ?? 12);
-    pin = { lat:place.lat, lon:place.lon, layer:layer.value };
+    pin = {...place,layer:layer.value};
   }
   details();
   schedule();
 }
-function select(row) {
+function select(row, fromScan = false) {
   if (!row) return;
   active = row;
-  jumpExample(0);
+  if (fromScan && selectedPixels) {
+    exampleNumber = 0;
+    teaching = false;
+    showTarget = true;
+    pin = null;
+    inkState = null;
+    sampleNotice = 'Showing the ink within the selected area.';
+    selectionOutline.hidden = true;
+    details();
+    schedule();
+  } else {
+    jumpExample(0);
+    if (row.id.startsWith('guide-')) openGuide(row.title,row.illustration);
+  }
   renderList(true);
   setIndex(false);
 }
@@ -301,7 +423,7 @@ function draw() {
         img.dataset.x = x;
         img.dataset.y = y;
         const tileUrl = tileRoot + record.service + '/MapServer/tile/' + z + '/' + y + '/' + ((x%tileCount+tileCount)%tileCount);
-        img.addEventListener('load', () => {img.dataset.state = 'ready'; mapStatus();});
+        img.addEventListener('load', () => {img.dataset.state = 'ready'; mapStatus(); if (pin?.ink) schedule();});
         img.addEventListener('error', () => {
           if (!img.dataset.retried) {
             img.dataset.retried = 'true';
@@ -324,14 +446,7 @@ function draw() {
     img.style.height = (size+.12)+'px';
     img.style.transform = 'translate(' + (left+Number(img.dataset.x)*size) + 'px,' + (top+Number(img.dataset.y)*size) + 'px)';
   }
-  target.hidden = !pin || !showTarget || pin.layer !== layer.value;
-  if (!target.hidden) {
-    const point = project(pin.lat,pin.lon);
-    const dx = wrap(point.x-center.x+.5)-.5;
-    const scale = 256*2**view.zoom;
-    target.style.left = (width/2+dx*scale)+'px';
-    target.style.top = (height/2+(point.y-center.y)*scale)+'px';
-  }
+  drawHighlight(center,width,height);
   byId('zoom-in').disabled = view.zoom >= 15;
   byId('zoom-out').disabled = view.zoom <= record.min;
   byId('position').textContent = view.lat.toFixed(3) + '°, ' + view.lon.toFixed(3) + '° · Zoom ' + view.zoom.toFixed(1);
@@ -408,6 +523,7 @@ byId('home').addEventListener('click',() => {
   renderList(true);
 });
 byId('open-index').addEventListener('click',() => setIndex(!indexPanel.classList.contains('open')));
+byId('close-index').addEventListener('click',() => setIndex(false));
 layer.addEventListener('change',() => {resetScan(); setView(view.lat,view.lon,view.zoom);});
 family.addEventListener('change',() => renderList());
 search.addEventListener('input',() => {
@@ -509,7 +625,7 @@ function toFeature(source, feature) {
   return {
     id:'live-'+source.id+'-'+fields.OBJECTID,group:source.group,section:source.label,title,code,
     description:'Coordinates from FAA aeronautical data. This lookup does not verify the printed marking at that point.',
-    examples:[{name:title,kind:'FAA data location',lat,lon,zoom:paths?10:12,layer:chart,
+    examples:[{name:title,kind:paths ? 'FAA boundary or route geometry' : 'FAA data location',lat,lon,zoom:paths?10:12,layer:chart,paths,
       url:featureRoot+source.id+'/FeatureServer/0'}],live:true
   };
 }
@@ -557,6 +673,7 @@ function resetScan() {
   sampleState = null;
   sampleNotice = '';
   selectedBox = null;
+  selectedPixels = null;
   selectionOutline.hidden = true;
   if (symbolCandidates !== null) {
     symbolCandidates = null;
@@ -594,7 +711,7 @@ function showBox({x,y,w,h}) {
 }
 
 function drawSelection(center,width,height) {
-  if (!selectedBox) return;
+  if (!selectedBox || selectedPixels?.mask) return;
   const scale = 256*2**view.zoom;
   const ratio = 2**(view.zoom-selectedBox.zoom);
   showBox({
@@ -641,6 +758,7 @@ map.addEventListener('pointerup', async event => {
   try {
     const snapshot = await chartPixels(box);
     if (request !== sampleVersion) return;
+    selectedPixels = {image:snapshot,box:selectedBox};
     symbolCandidates = rankSymbols(describeSymbol(snapshot),state.layer);
     renderList();
     setIndex(true);
@@ -671,8 +789,13 @@ async function chartPixels(box) {
   await Promise.allSettled(images.map(image => new Promise((resolve,reject) => {
     const bitmap = new Image();
     bitmap.crossOrigin = 'anonymous';
-    bitmap.onload = () => {ctx.drawImage(bitmap,image.x,image.y,image.size,image.size); resolve();};
-    bitmap.onerror = reject;
+    const timeout = setTimeout(() => reject(new Error('Chart tile timed out')),5000);
+    bitmap.onload = () => {
+      clearTimeout(timeout);
+      ctx.drawImage(bitmap,image.x,image.y,image.size,image.size);
+      resolve();
+    };
+    bitmap.onerror = error => {clearTimeout(timeout); reject(error);};
     bitmap.src = image.url;
   })));
   return ctx.getImageData(0,0,box.w,box.h);
@@ -682,16 +805,10 @@ function describeSymbol({data,width,height}) {
   const colors = {blue:0,magenta:0,dark:0,green:0,brown:0};
   let covered = 0;
   for (let i=0;i<data.length;i+=4) {
-    const [r,g,b,alpha] = data.subarray(i,i+4);
-    if (alpha < 220) continue;
+    if (data[i+3] < 220) continue;
     covered++;
-    const lightest = Math.max(r,g,b);
-    const darkest = Math.min(r,g,b);
-    if (b-g>12 && r-g>14 && lightest<246) colors.magenta++;
-    else if (b-r>21 && b>=g-5 && darkest<172) colors.blue++;
-    else if (g-r>17 && g-b>8 && darkest<165) colors.green++;
-    else if (r-b>30 && r-g>8 && darkest<170) colors.brown++;
-    else if (lightest<126 && lightest-darkest<47) colors.dark++;
+    const color = chartInk(data[i],data[i+1],data[i+2]);
+    if (color) colors[color]++;
   }
   if (covered < width*height*.75) throw new Error('Incomplete tile coverage');
   return {colors,aspect:Math.max(width/height,height/width),area:covered};
@@ -729,9 +846,143 @@ function rankSymbols({colors,aspect,area},chartLayer) {
     const score = count/peak + ((shape==='compact')===compact ? .45 : 0);
     for (const row of relevantRows) {
       if (!titles.test(row.title) || (candidates.get(row.id)?.score ?? 0) >= score) continue;
-      candidates.set(row.id,{row,cue,score});
+      candidates.set(row.id,{row,cue,score,color});
     }
   }
   return [...candidates.values()].sort((a,b) => b.score-a.score)
     .slice(0,10);
+}
+
+function chartInk(r,g,b) {
+  const lightest = Math.max(r,g,b);
+  const darkest = Math.min(r,g,b);
+  if (b-g>12 && r-g>14 && lightest<246) return 'magenta';
+  if (b-r>21 && b>=g-5 && darkest<172) return 'blue';
+  if (g-r>17 && g-b>8 && darkest<165) return 'green';
+  if (r-b>30 && r-g>8 && darkest<170) return 'brown';
+  if (lightest<126 && lightest-darkest<47) return 'dark';
+  return '';
+}
+
+function makeInkMask({data,width,height}, color, centerOnly = false) {
+  const count = width*height;
+  const remaining = new Uint8Array(count);
+  const mask = new Uint8Array(count);
+  for (let i=0;i<count;i++) {
+    const p=i*4;
+    remaining[i] = data[p+3]>220 && chartInk(data[p],data[p+1],data[p+2])===color ? 1 : 0;
+  }
+  const components = [];
+  const queue = new Int32Array(count);
+  for (let i=0;i<count;i++) {
+    if (!remaining[i]) continue;
+    let length=1, nearest=Infinity;
+    remaining[i]=0;
+    queue[0]=i;
+    for (let j=0;j<length;j++) {
+      const current=queue[j], x=current%width, y=Math.floor(current/width);
+      nearest=Math.min(nearest,Math.hypot(x-width/2,y-height/2));
+      for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++) {
+        if (x+dx<0 || x+dx>=width || y+dy<0 || y+dy>=height) continue;
+        const next=current+dy*width+dx;
+        if (remaining[next]) {
+          remaining[next]=0;
+          queue[length++]=next;
+        }
+      }
+    }
+    if (length>=3) components.push({pixels:queue.slice(0,length),nearest});
+  }
+  const largest = Math.max(0,...components.map(part => part.pixels.length));
+  if (!largest) return null;
+  if (centerOnly) {
+    const nearby = components.filter(part => part.nearest <= 12);
+    if (!nearby.length) return null;
+    const anchor = nearby.sort((a,b) => b.pixels.length/(1+b.nearest)-a.pixels.length/(1+a.nearest))[0];
+    const primary = new Set(anchor.pixels);
+    for (const part of components) {
+      if (part.nearest > Math.min(width,height)*.46) continue;
+      if (part===anchor || part.pixels.length >= anchor.pixels.length*.12 &&
+          part.pixels.some(p => {
+            const x=p%width,y=Math.floor(p/width);
+            for (let dy=-5;dy<=5;dy++) for (let dx=-5;dx<=5;dx++) {
+              if (x+dx>=0 && x+dx<width && y+dy>=0 && y+dy<height && primary.has(p+dy*width+dx)) return true;
+            }
+            return false;
+          })) for (const p of part.pixels) mask[p]=1;
+    }
+  } else {
+    for (const part of components) {
+      if (part.pixels.length>=Math.max(3,largest*.055)) for (const p of part.pixels) mask[p]=1;
+    }
+  }
+  return {mask,width,height};
+}
+
+function paintInk(raster) {
+  targetInk.width=raster.width;
+  targetInk.height=raster.height;
+  const context=targetInk.getContext('2d');
+  const pixels=context.createImageData(raster.width,raster.height);
+  const {mask,width,height}=raster;
+  for (let p=0;p<mask.length;p++) {
+    if (!mask[p]) continue;
+    const x=p%width, y=Math.floor(p/width);
+    for (let dy=-2;dy<=2;dy++) for (let dx=-2;dx<=2;dx++) {
+      if (dx*dx+dy*dy>5 || x+dx<0 || x+dx>=width || y+dy<0 || y+dy>=height) continue;
+      const i=(p+dy*width+dx)*4;
+      if (!pixels.data[i+3]) pixels.data.set([10,50,45,190],i);
+    }
+    pixels.data.set([248,255,136,172],p*4);
+  }
+  context.putImageData(pixels,0,0);
+}
+
+let drawnRaster = null;
+function drawHighlight(center,width,height) {
+  const visible = showTarget && pin?.layer === layer.value;
+  const scale=256*2**view.zoom;
+  const screenPoint = ({x,y}) => ({
+    x:width/2+(wrap(x-center.x+.5)-.5)*scale,
+    y:height/2+(y-center.y)*scale
+  });
+  const paths = visible ? pin.paths : null;
+  target.style.display=paths ? '' : 'none';
+  if (paths) {
+    const outline = paths.map(path => path.map(([lon,lat],index) => {
+      const pt=screenPoint(project(lat,lon));
+      return (index?'L':'M')+pt.x.toFixed(1)+' '+pt.y.toFixed(1);
+    }).join(' ')).join(' ');
+    for (const line of target.children) line.setAttribute('d',outline);
+  }
+
+  if (visible && pin.ink && !inkState) {
+    const point=screenPoint(project(pin.lat,pin.lon));
+    const radius=pin.radius || 24;
+    const box={x:Math.floor(point.x-radius),y:Math.floor(point.y-radius),w:radius*2,h:radius*2};
+    if (box.x>=0 && box.y>=0 && box.x+box.w<=width && box.y+box.h<=height &&
+        visibleImages.length && visibleImages.every(img => img.dataset.state)) {
+      const request=pin;
+      const state={box:{...coordAt(box.x,box.y),zoom:view.zoom}};
+      inkState=state;
+      chartPixels(box).then(image => {
+        if (pin!==request || inkState!==state) return;
+        state.mask=makeInkMask(image,request.ink,true);
+        schedule();
+      }).catch(() => {});
+    }
+  }
+  const rendered = selectedPixels?.mask ? selectedPixels : visible ? inkState : null;
+  targetInk.hidden=!rendered?.mask;
+  if (!rendered?.mask) return;
+  if (drawnRaster!==rendered.mask) {
+    paintInk(rendered.mask);
+    drawnRaster=rendered.mask;
+  }
+  const point=screenPoint(rendered.box);
+  const ratio=2**(view.zoom-rendered.box.zoom);
+  Object.assign(targetInk.style,{
+    left:point.x+'px',top:point.y+'px',
+    width:rendered.mask.width*ratio+'px',height:rendered.mask.height*ratio+'px'
+  });
 }

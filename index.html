@@ -5,9 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Find aeronautical chart markings and teach from real FAA charts.">
   <title>Sectional Chart Trainer</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=guide-1">
   <script defer src="catalog.js"></script>
-  <script defer src="app.js"></script>
+  <script defer src="guide-assets.js?v=guide-1"></script>
+  <script defer src="map-examples.js?v=guide-1"></script>
+  <script defer src="app.js?v=guide-1"></script>
 </head>
 <body>
   <header class="masthead">
@@ -17,11 +19,12 @@
   </header>
   <main>
     <aside class="index" id="index">
-      <label for="search">Find a chart marking</label>
+      <div class="index-heading"><label for="search">Find a chart marking</label><button id="close-index" type="button">Close index</button></div>
       <div class="search-wrap"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="e.g. blue fuzzy line, KABE, railroad" autocomplete="off" spellcheck="false"></div>
       <nav aria-label="Index filters" class="filters">
         <button class="selected" type="button" data-filter="all" aria-pressed="true">All</button>
         <button type="button" data-filter="examples" aria-pressed="false">Chart examples</button>
+        <button type="button" data-filter="guide" aria-pressed="false">FAA figures</button>
         <button type="button" data-filter="saved" aria-pressed="false">Saved</button>
       </nav>
       <div class="index-tools">
@@ -47,7 +50,8 @@
       <div class="map-pane">
         <div id="map" tabindex="0" aria-label="Interactive FAA chart. Use arrow keys to pan, plus and minus to zoom.">
           <div id="tiles" aria-hidden="true"></div>
-          <div id="target" aria-hidden="true" hidden></div>
+          <canvas id="target-ink" aria-hidden="true" hidden></canvas>
+          <svg id="target" aria-hidden="true"><path class="highlight-halo"></path><path class="highlight-path"></path></svg>
           <div id="scan-marks" aria-hidden="true"></div>
         </div>
         <div id="map-notice" class="map-notice" role="status" hidden></div>
@@ -61,6 +65,14 @@
       <article id="details" class="details" aria-live="polite"></article>
     </section>
   </main>
+  <dialog id="guide-dialog" aria-labelledby="guide-title">
+    <div class="guide-dialog-bar">
+      <div><h2 id="guide-title"></h2><p id="guide-credit"></p></div>
+      <form method="dialog"><button type="submit">Close</button></form>
+    </div>
+    <div id="guide-figure"></div>
+    <a id="guide-page" target="_blank" rel="noopener">Open this page in the FAA guide ↗</a>
+  </dialog>
   <template id="empty"><p class="empty">No matches. Try a broader term or change the chart family.</p></template>
   <noscript>This trainer requires JavaScript. The FAA guide and charts are available directly from the FAA.</noscript>
 </body>
