@@ -9,7 +9,9 @@ const layer = byId('layer');
 const map = byId('map');
 const tiles = byId('tiles');
 const target = byId('target');
-const targetInk = byId('target-ink');
+const targetShape = byId('target-shape');
+const targetRingOuter = byId('target-ring-outer');
+const targetRingGap = byId('target-ring-gap');
 const notice = byId('map-notice');
 const guidePdf = 'https://aeronav.faa.gov/user_guide/cug-complete_20260709.pdf';
 const vfr = 'https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/vfr/';
@@ -339,7 +341,7 @@ function select(row, fromScan = false) {
     showTarget = true;
     pin = null;
     inkState = null;
-    sampleNotice = 'Showing the ink within the selected area.';
+    sampleNotice = 'Outlined the marking inside your selection.';
     selectionOutline.hidden = true;
     details();
     schedule();
@@ -663,7 +665,7 @@ async function searchFeatures(raw,request) {
 const scanButton = byId('scanner');
 const scanMarks = byId('scan-marks');
 const selectionOutline = el('div');
-selectionOutline.style.cssText = 'position:absolute;pointer-events:none;z-index:3;border:2px solid #faff92;background:#faff9225;box-shadow:0 0 0 1px #253438';
+selectionOutline.style.cssText = 'position:absolute;pointer-events:none;z-index:3;border:2px solid #faff92;box-shadow:0 0 0 1px #253438';
 selectionOutline.hidden = true;
 scanMarks.append(selectionOutline);
 scanButton.title = 'Drag a box around a chart symbol to filter the index';
@@ -919,26 +921,46 @@ function makeInkMask({data,width,height}, color, centerOnly = false) {
   return {mask,width,height};
 }
 
-function paintInk(raster) {
-  targetInk.width=raster.width;
-  targetInk.height=raster.height;
-  const context=targetInk.getContext('2d');
-  const pixels=context.createImageData(raster.width,raster.height);
-  const {mask,width,height}=raster;
-  for (let p=0;p<mask.length;p++) {
-    if (!mask[p]) continue;
-    const x=p%width, y=Math.floor(p/width);
-    for (let dy=-2;dy<=2;dy++) for (let dx=-2;dx<=2;dx++) {
-      if (dx*dx+dy*dy>5 || x+dx<0 || x+dx>=width || y+dy<0 || y+dy>=height) continue;
-      const i=(p+dy*width+dx)*4;
-      if (!pixels.data[i+3]) pixels.data.set([10,50,45,190],i);
-    }
-    pixels.data.set([248,255,136,172],p*4);
+// Fill enclosed holes so the outline goes around the symbol's silhouette.
+function silhouettePath({mask,width,height}) {
+  const outside = new Uint8Array(mask.length);
+  const queue = new Int32Array(mask.length);
+  let tail = 0;
+  const visit = index => {
+    if (mask[index] || outside[index]) return;
+    outside[index] = 1;
+    queue[tail++] = index;
+  };
+  for (let x=0;x<width;x++) {
+    visit(x);
+    visit((height-1)*width+x);
   }
-  context.putImageData(pixels,0,0);
+  for (let y=0;y<height;y++) {
+    visit(y*width);
+    visit(y*width+width-1);
+  }
+  for (let head=0;head<tail;head++) {
+    const i=queue[head], x=i%width;
+    if (x>0) visit(i-1);
+    if (x+1<width) visit(i+1);
+    if (i>=width) visit(i-width);
+    if (i+width<mask.length) visit(i+width);
+  }
+  const runs = [];
+  for (let y=0;y<height;y++) {
+    let x=0;
+    while (x<width) {
+      if (outside[y*width+x]) { x++; continue; }
+      const start=x++;
+      while (x<width && !outside[y*width+x]) x++;
+      runs.push('M'+start+' '+y+'H'+x+'v1H'+start+'Z');
+    }
+  }
+  return runs.join('');
 }
 
 let drawnRaster = null;
+let drawnSilhouette = '';
 function drawHighlight(center,width,height) {
   const visible = showTarget && pin?.layer === layer.value;
   const scale=256*2**view.zoom;
@@ -947,15 +969,6 @@ function drawHighlight(center,width,height) {
     y:height/2+(y-center.y)*scale
   });
   const paths = visible ? pin.paths : null;
-  target.style.display=paths ? '' : 'none';
-  if (paths) {
-    const outline = paths.map(path => path.map(([lon,lat],index) => {
-      const pt=screenPoint(project(lat,lon));
-      return (index?'L':'M')+pt.x.toFixed(1)+' '+pt.y.toFixed(1);
-    }).join(' ')).join(' ');
-    for (const line of target.children) line.setAttribute('d',outline);
-  }
-
   if (visible && pin.ink && !inkState) {
     const point=screenPoint(project(pin.lat,pin.lon));
     const radius=pin.radius || 24;
@@ -973,16 +986,32 @@ function drawHighlight(center,width,height) {
     }
   }
   const rendered = selectedPixels?.mask ? selectedPixels : visible ? inkState : null;
-  targetInk.hidden=!rendered?.mask;
-  if (!rendered?.mask) return;
-  if (drawnRaster!==rendered.mask) {
-    paintInk(rendered.mask);
-    drawnRaster=rendered.mask;
+  const raster = rendered?.mask;
+  target.style.display = paths || raster ? '' : 'none';
+  if (!paths && !raster) return;
+
+  let outline;
+  if (raster) {
+    if (drawnRaster!==raster) {
+      drawnSilhouette = silhouettePath(raster);
+      drawnRaster = raster;
+    }
+    outline = drawnSilhouette;
+    const {x,y}=screenPoint(rendered.box);
+    const ratio=2**(view.zoom-rendered.box.zoom);
+    targetShape.setAttribute('transform','translate('+x+' '+y+') scale('+ratio+')');
+  } else {
+    outline = paths.map(path => path.map(([lon,lat],index) => {
+      const pt=screenPoint(project(lat,lon));
+      return (index?'L':'M')+pt.x.toFixed(1)+' '+pt.y.toFixed(1);
+    }).join(' ')).join(' ');
+    targetShape.removeAttribute('transform');
   }
-  const point=screenPoint(rendered.box);
-  const ratio=2**(view.zoom-rendered.box.zoom);
-  Object.assign(targetInk.style,{
-    left:point.x+'px',top:point.y+'px',
-    width:rendered.mask.width*ratio+'px',height:rendered.mask.height*ratio+'px'
-  });
+  // The mask subtracts both the marking and a buffer around it.
+  const gap = raster ? 6 : Math.max(6, 2.5*2**(view.zoom-layers[layer.value].max));
+  targetRingOuter.setAttribute('stroke-width',2*(gap+2));
+  targetRingGap.setAttribute('stroke-width',2*gap);
+  targetRingOuter.setAttribute('fill',raster ? 'white' : 'none');
+  targetRingGap.setAttribute('fill',raster ? 'black' : 'none');
+  if (targetShape.getAttribute('d')!==outline) targetShape.setAttribute('d',outline);
 }

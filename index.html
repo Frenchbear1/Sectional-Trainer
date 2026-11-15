@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Find aeronautical chart markings and teach from real FAA charts.">
   <title>Sectional Chart Trainer</title>
-  <link rel="stylesheet" href="style.css?v=guide-1">
+  <link rel="stylesheet" href="style.css?v=outline-1">
   <script defer src="catalog.js"></script>
   <script defer src="guide-assets.js?v=guide-1"></script>
   <script defer src="map-examples.js?v=guide-1"></script>
-  <script defer src="app.js?v=guide-1"></script>
+  <script defer src="app.js?v=outline-1"></script>
 </head>
 <body>
   <header class="masthead">
@@ -50,8 +50,16 @@
       <div class="map-pane">
         <div id="map" tabindex="0" aria-label="Interactive FAA chart. Use arrow keys to pan, plus and minus to zoom.">
           <div id="tiles" aria-hidden="true"></div>
-          <canvas id="target-ink" aria-hidden="true" hidden></canvas>
-          <svg id="target" aria-hidden="true"><path class="highlight-halo"></path><path class="highlight-path"></path></svg>
+          <svg id="target" aria-hidden="true">
+            <defs>
+              <path id="target-shape" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"></path>
+              <mask id="target-ring-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="100%" height="100%">
+                <use id="target-ring-outer" href="#target-shape" fill="white" stroke="white" stroke-width="16"></use>
+                <use id="target-ring-gap" href="#target-shape" fill="black" stroke="black" stroke-width="12"></use>
+              </mask>
+            </defs>
+            <rect width="100%" height="100%" fill="#edff9e" mask="url(#target-ring-mask)"></rect>
+          </svg>
           <div id="scan-marks" aria-hidden="true"></div>
         </div>
         <div id="map-notice" class="map-notice" role="status" hidden></div>
